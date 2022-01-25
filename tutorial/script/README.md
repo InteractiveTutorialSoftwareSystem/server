@@ -1,0 +1,1 @@
+This is the folder to store all the script run by the front end
