@@ -19,6 +19,8 @@ from schema import Tutorial, TutorialSection, User, UserTutorialState, db
 from sqlalchemy import or_, and_
 from collections import Counter
 from datetime import datetime
+import hashlib
+import string
 
 import nltk
 nltk.download('stopwords')
@@ -26,13 +28,70 @@ nltk.download('punkt')
 from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize
 
+# Input validation helpers
+def validate_string_input(value, max_length=320, allow_empty=False):
+    """Basic string validation to prevent injection attacks"""
+    if not allow_empty and (not value or not value.strip()):
+        return False, "Field cannot be empty"
+    
+    if value and len(value) > max_length:
+        return False, f"Field exceeds maximum length of {max_length}"
+    
+    # Basic XSS prevention - block common script tags and SQL injection patterns
+    dangerous_patterns = ['<script', 'javascript:', 'onclick=', 'onerror=', 'onload=', 
+                         'SELECT ', 'INSERT ', 'UPDATE ', 'DELETE ', 'DROP ', 'UNION ']
+    
+    value_upper = value.upper() if value else ""
+    for pattern in dangerous_patterns:
+        if pattern.upper() in value_upper:
+            return False, "Invalid characters detected"
+    
+    return True, None
+
+def validate_integer_input(value, min_val=None, max_val=None):
+    """Validate integer input and convert from string if needed"""
+    try:
+        if isinstance(value, str):
+            value = int(value)
+        elif not isinstance(value, int):
+            return False, None, "Invalid integer format"
+        
+        if min_val is not None and value < min_val:
+            return False, None, f"Value must be at least {min_val}"
+        
+        if max_val is not None and value > max_val:
+            return False, None, f"Value cannot exceed {max_val}"
+            
+        return True, value, None
+    except (ValueError, TypeError):
+        return False, None, "Invalid integer format"
+
+def validate_uuid_input(value):
+    """Validate UUID format"""
+    if not value:
+        return False, "UUID cannot be empty"
+    
+    if not isinstance(value, str):
+        return False, "UUID must be a string"
+    
+    # Basic UUID format validation (alphanumeric and dashes, correct length)
+    uuid_pattern = r'^[a-fA-F0-9]{8}-?[a-fA-F0-9]{4}-?[a-fA-F0-9]{4}-?[a-fA-F0-9]{4}-?[a-fA-F0-9]{12}$|^[a-fA-F0-9]{32}$'
+    if not re.match(uuid_pattern, value):
+        return False, "Invalid UUID format"
+    
+    if len(value) not in [32, 36]:  # 32 for hex string, 36 for UUID with dashes
+        return False, "Invalid UUID length"
+    
+    return True, None
+
 
 # Initialize flask app
 application = app = Flask(__name__)
-app.debug = True
-# Initializes CORS
+app.debug = config("DEBUG", default=False, cast=bool)
+# Initializes CORS with specific origins
 cors = flask_cors.CORS()
-cors.init_app(app)
+allowed_origins = config("ALLOWED_ORIGINS", default="http://localhost:3000").split(",")
+cors.init_app(app, origins=allowed_origins, supports_credentials=True)
 
 # Initialize a local database
 # db = flask_sqlalchemy.SQLAlchemy()
@@ -79,6 +138,14 @@ def after_request_func(response):
   # list of flask.Response attributes can be found at https://tedboy.github.io/flask/generated/generated/flask.Response.html#attributes
   log_data = {'status': response.status_code, 'uuid': g.uuid}
   app.logger.info(str(log_data))
+  
+  # Add security headers
+  response.headers['X-Content-Type-Options'] = 'nosniff'
+  response.headers['X-Frame-Options'] = 'DENY'
+  response.headers['X-XSS-Protection'] = '1; mode=block'
+  response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
+  response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
+  
   return response
 
 
@@ -93,93 +160,167 @@ def test():
 '''
 Tutorial
 '''
-@app.route("/tutorials/get_all/<UserId>")
+@app.route("/tutorials/get_all/<int:UserId>")
 def get_all_tutorials(UserId):
   """
     Gets all tutorials for the learner that are within the publish duration.
     Also gets the last assessed page by the learner for each tutorial.
   """
-  date_time_now = datetime.utcnow()
-  tutorials = db.session.query(Tutorial, User, UserTutorialState).join(User, Tutorial.userid == User.id) \
-  .outerjoin(UserTutorialState, (Tutorial.id==UserTutorialState.tutorial_id) & (UserTutorialState.user_id==UserId)) \
-  .filter(or_(and_(Tutorial.start_date < date_time_now, Tutorial.end_date > date_time_now), and_(Tutorial.start_date < date_time_now, Tutorial.end_date == None))).all()
+  try:
+    # Validate UserId is a positive integer
+    is_valid, user_id, error_msg = validate_integer_input(UserId, min_val=1)
+    if not is_valid:
+      return jsonify({"error": f"Invalid user ID: {error_msg}"}), 400
+      
+    date_time_now = datetime.utcnow()
+    tutorials = db.session.query(Tutorial, User, UserTutorialState).join(User, Tutorial.userid == User.id) \
+    .outerjoin(UserTutorialState, (Tutorial.id==UserTutorialState.tutorial_id) & (UserTutorialState.user_id==user_id)) \
+    .filter(or_(and_(Tutorial.start_date < date_time_now, Tutorial.end_date > date_time_now), and_(Tutorial.start_date < date_time_now, Tutorial.end_date == None))).all()
 
-  tutorialsJson = []
-  for tutorial in tutorials:
-    # print(tutorial)
-    tutorialJson = {
-      "id": tutorial[0].id,
-      "name": tutorial[0].name,
-      "language": tutorial[0].language,
-      "startDatetime": tutorial[0].start_date,
-      "endDatetime": tutorial[0].end_date,
-      "sequence": len(tutorial[0].sequence[1:-1].split(",")),
-      "user_name": tutorial[1].name,
-      "user_picture": tutorial[1].picture,
-      "last_page": tutorial[2] and tutorial[2].last_page or 0,
-    }
-    tutorialsJson.append(tutorialJson)
-  
-  log_data = {'userId': UserId, 'role': 'learner', 'action': 'Learner Homepage', 'uuid': g.uuid}
-  app.logger.info(str(log_data))
-  return jsonify({"tutorials": tutorialsJson}), 200
+    tutorialsJson = []
+    for tutorial in tutorials:
+      # Safely parse sequence length
+      sequence_length = 0
+      try:
+        if tutorial[0].sequence:
+          sequence_data = json.loads(tutorial[0].sequence)
+          if isinstance(sequence_data, list):
+            sequence_length = len(sequence_data)
+      except (json.JSONDecodeError, TypeError):
+        sequence_length = 0
+        
+      tutorialJson = {
+        "id": tutorial[0].id,
+        "name": tutorial[0].name,
+        "language": tutorial[0].language,
+        "startDatetime": tutorial[0].start_date,
+        "endDatetime": tutorial[0].end_date,
+        "sequence": sequence_length,
+        "user_name": tutorial[1].name,
+        "user_picture": tutorial[1].picture,
+        "last_page": tutorial[2] and tutorial[2].last_page or 0,
+      }
+      tutorialsJson.append(tutorialJson)
+    
+    log_data = {'userId': user_id, 'role': 'learner', 'action': 'Learner Homepage', 'uuid': g.uuid}
+    app.logger.info(str(log_data))
+    return jsonify({"tutorials": tutorialsJson}), 200
+    
+  except Exception as e:
+    app.logger.error(f"Error in get_all_tutorials: {str(e)}, uuid: {g.uuid}")
+    return jsonify({"error": "Internal server error"}), 500
 
 @app.route('/tutorial/get/<string:TutorialId>')
 def get_tutorial_by_id(TutorialId):
   """
     Gets all tutorial details from Tutorial ID.
   """
-  tutorial = Tutorial.query.filter_by(id=TutorialId).first()
-  if tutorial:
-    # log_data = {'tutorialId': TutorialId, 'action': 'get_tutorial_by_id', 'uuid': g.uuid}
-    # app.logger.info(str(log_data))
+  try:
+    # Validate UUID format
+    is_valid, error_msg = validate_uuid_input(TutorialId)
+    if not is_valid:
+      return jsonify({"error": f"Invalid tutorial ID: {error_msg}"}), 400
+    
+    tutorial = Tutorial.query.filter_by(id=TutorialId).first()
+    if not tutorial:
+      return jsonify({"error": "Tutorial not found"}), 404
+      
+    log_data = {'tutorialId': TutorialId, 'action': 'get_tutorial_by_id', 'uuid': g.uuid}
+    app.logger.info(str(log_data))
     return jsonify(tutorial.json()), 200
-  return jsonify({"message": "Tutorial not found"}), 200
+    
+  except Exception as e:
+    app.logger.error(f"Error in get_tutorial_by_id: {str(e)}, uuid: {g.uuid}")
+    return jsonify({"error": "Internal server error"}), 500
 
-@app.route('/tutorials/get/<string:UserId>')
+@app.route('/tutorials/get/<int:UserId>')
 def get_tutorial_by_user_id(UserId):
   """
     Gets all author's tutorials.
   """
-  tutorials = db.session.query(Tutorial, User).join(User, Tutorial.userid == User.id).filter_by(id = UserId).all()
-  tutorialsJson = []
-  for tutorial in tutorials:
-    tutorialJson = {
-      "id": tutorial[0].id,
-      "name": tutorial[0].name,
-      "language": tutorial[0].language,
-      "sequence": len(tutorial[0].sequence[1:-1].split(",")),
-      "user_name": tutorial[1].name,
-      "user_picture": tutorial[1].picture,
-    }
-    tutorialsJson.append(tutorialJson)
-  
-  log_data = {'userId': UserId, 'role': 'author', 'action': 'Author Homepage', 'uuid': g.uuid}
-  app.logger.info(str(log_data))
-  return jsonify({"tutorials": tutorialsJson}), 200
+  try:
+    # Validate UserId is a positive integer
+    is_valid, user_id, error_msg = validate_integer_input(UserId, min_val=1)
+    if not is_valid:
+      return jsonify({"error": f"Invalid user ID: {error_msg}"}), 400
+      
+    tutorials = db.session.query(Tutorial, User).join(User, Tutorial.userid == User.id).filter_by(id=user_id).all()
+    tutorialsJson = []
+    for tutorial in tutorials:
+      # Safely parse sequence length
+      sequence_length = 0
+      try:
+        if tutorial[0].sequence:
+          sequence_data = json.loads(tutorial[0].sequence)
+          if isinstance(sequence_data, list):
+            sequence_length = len(sequence_data)
+      except (json.JSONDecodeError, TypeError):
+        sequence_length = 0
+        
+      tutorialJson = {
+        "id": tutorial[0].id,
+        "name": tutorial[0].name,
+        "language": tutorial[0].language,
+        "sequence": sequence_length,
+        "user_name": tutorial[1].name,
+        "user_picture": tutorial[1].picture,
+      }
+      tutorialsJson.append(tutorialJson)
+    
+    log_data = {'userId': user_id, 'role': 'author', 'action': 'Author Homepage', 'uuid': g.uuid}
+    app.logger.info(str(log_data))
+    return jsonify({"tutorials": tutorialsJson}), 200
+    
+  except Exception as e:
+    app.logger.error(f"Error in get_tutorial_by_user_id: {str(e)}, uuid: {g.uuid}")
+    return jsonify({"error": "Internal server error"}), 500
 
 @app.route('/tutorial/create', methods=['POST'])
 def create_tutorial():
   """
     Create a new tutorial
   """
-  data = request.get_json(force=True)
-  name = data['name']
-  language = data['language']
-  unique_index = uuid.uuid4().hex
-  userid = data['userid']
-  
-  statement = Tutorial(id=unique_index, name=name, language=language, sequence="[]", userid=userid, start_date=None, end_date=None)
-
   try:
+    data = request.get_json(force=True)
+    if not data:
+      return jsonify({"error": "No data provided"}), 400
+      
+    # Validate required fields
+    required_fields = ['name', 'language', 'userid']
+    for field in required_fields:
+      if field not in data or not data[field]:
+        return jsonify({"error": f"Missing required field: {field}"}), 400
+    
+    # Validate inputs
+    is_valid, error_msg = validate_string_input(data['name'], max_length=320)
+    if not is_valid:
+      return jsonify({"error": f"Invalid name: {error_msg}"}), 400
+      
+    is_valid, error_msg = validate_string_input(data['language'], max_length=100)
+    if not is_valid:
+      return jsonify({"error": f"Invalid language: {error_msg}"}), 400
+    
+    is_valid, user_id, error_msg = validate_integer_input(data['userid'], min_val=1)
+    if not is_valid:
+      return jsonify({"error": f"Invalid user ID: {error_msg}"}), 400
+    
+    name = data['name'].strip()
+    language = data['language'].strip()
+    unique_index = uuid.uuid4().hex
+    
+    statement = Tutorial(id=unique_index, name=name, language=language, sequence="[]", userid=user_id, start_date=None, end_date=None)
+
     db.session.add(statement)
     db.session.commit()
-  except:
-    return jsonify({"message": "An error occurred creating the tutorial"}), 500
-
-  log_data = {'userId': userid, 'role': 'author', 'tutorialId': unique_index, 'action': 'Create Tutorial', 'uuid': g.uuid}
-  app.logger.info(str(log_data))
-  return jsonify({"id": unique_index}), 200
+    
+    log_data = {'userId': user_id, 'role': 'author', 'tutorialId': unique_index, 'action': 'Create Tutorial', 'uuid': g.uuid}
+    app.logger.info(str(log_data))
+    return jsonify({"id": unique_index}), 200
+    
+  except Exception as e:
+    db.session.rollback()
+    app.logger.error(f"Error creating tutorial: {str(e)}, uuid: {g.uuid}")
+    return jsonify({"error": "Internal server error"}), 500
 
 @app.route('/tutorial/createsample', methods=['POST'])
 def create_tutorial_sample():
@@ -193,7 +334,11 @@ def create_tutorial_sample():
 
   sample_tutorial_id = config("SAMPLE_TUTORIAL_ID")
   sample_tutorial_details = Tutorial.query.filter_by(id=sample_tutorial_id).first()
-  sample_tutorial_page_ids = eval(sample_tutorial_details.sequence)
+  try:
+    sample_tutorial_page_ids = json.loads(sample_tutorial_details.sequence)
+  except (json.JSONDecodeError, TypeError) as e:
+    app.logger.error(f"Failed to parse tutorial sequence: {e}")
+    sample_tutorial_page_ids = []
 
   statements = []
   tutorial_statement = Tutorial(
@@ -228,12 +373,20 @@ def create_tutorial_sample():
   return jsonify({"id": tutorial_id}), 200
 
 
-@app.route("/tutorial/get/<TutorialId>/<PageId>/<string:UserId>")
+@app.route("/tutorial/get/<string:TutorialId>/<int:PageId>/<int:UserId>")
 def getTutorialPageDetails(TutorialId, PageId, UserId):
   """
     Gets Tutorial Section details of the Page accessed. 
     Also save the last assessed details for the user.
   """
+  # Validate inputs
+  if not TutorialId or len(TutorialId) != 32:  # UUID hex length
+    return jsonify({"message": "Invalid tutorial ID"}), 400
+  if PageId <= 0:
+    return jsonify({"message": "Invalid page ID"}), 400
+  if UserId <= 0:
+    return jsonify({"message": "Invalid user ID"}), 400
+    
   tutorial_details = Tutorial.query.filter_by(id=TutorialId).first()
 
   tutorial_page_names = []
@@ -257,13 +410,15 @@ def getTutorialPageDetails(TutorialId, PageId, UserId):
     try:
       descriptionResponse = s3.get_object(Bucket=s3_bucket_name, Key=tutorial_page_details.id + '/description.md')
       description = descriptionResponse['Body'].read().decode('utf-8')
-    except:
+    except Exception as e:
+      app.logger.warning(f"Failed to load description: {e}")
       description = None
 
     try:
       keystrokeResponse = s3.get_object(Bucket=s3_bucket_name, Key=tutorial_page_details.id + '/keystroke.json')
       keystroke = keystrokeResponse['Body'].read().decode('utf-8')
-    except:
+    except Exception as e:
+      app.logger.warning(f"Failed to load keystroke: {e}")
       keystroke = None
 
     try:
@@ -434,8 +589,10 @@ def update_tutorial(TutorialId):
   try:
     db.session.merge(tutorial)
     db.session.commit()
-  except:
-    return jsonify({"message": "An error occurred creating the tutorial section"}), 500
+  except Exception as e:
+    db.session.rollback()
+    app.logger.error(f"Database error updating tutorial: {str(e)}, uuid: {g.uuid}")
+    return jsonify({"message": "An error occurred updating the tutorial"}), 500
   log_data = {'tutorialId': TutorialId, 'action': 'Update Tutorial Sequence', 'uuid': g.uuid}
   app.logger.info(str(log_data))
   return jsonify({"message": "success"}), 200
@@ -491,12 +648,54 @@ def remove_markdown_symbol(sentence):
   stripped_description = re.sub('[^A-Za-z0-9 ]+', ' ', stripped_description)
   return stripped_description
 
+def validate_filename(filename):
+  """
+    Validate filename to prevent path traversal attacks
+  """
+  # Remove any path separators and check for valid characters
+  basename = os.path.basename(filename)
+  if not basename or basename in ('.', '..'):
+    return False
+  # Only allow alphanumeric, dash, underscore, and dot
+  allowed_chars = string.ascii_letters + string.digits + '-_.'
+  return all(c in allowed_chars for c in basename)
+
+def sanitize_script_content(content, language):
+  """
+    Basic content sanitization for script execution
+  """
+  if not content or len(content) > 50000:  # Limit script size
+    return False
+  
+  # Block potentially dangerous imports/commands
+  dangerous_patterns = [
+    r'import\s+os', r'import\s+sys', r'import\s+subprocess',
+    r'__import__', r'eval\s*\(', r'exec\s*\(',
+    r'open\s*\(', r'file\s*\(', r'input\s*\(',
+    r'raw_input\s*\(', r'execfile\s*\(',
+  ]
+  
+  content_lower = content.lower()
+  for pattern in dangerous_patterns:
+    if re.search(pattern, content_lower):
+      return False
+  
+  return True
+
 @app.route("/upload_recording", methods=["POST"])
 def upload_recording():
   """
     This will trigger when author save the recording. It will save the keystroke, console action, layout action, select and scroll action, description.
   """
+  # Validate required tutorial_section_id
+  if 'tutorial_section_id' not in request.form:
+    return jsonify({"error": "Missing tutorial_section_id"}), 400
+    
   tutorial_section_id = request.form['tutorial_section_id']
+  is_valid, error_msg = validate_uuid_input(tutorial_section_id)
+  if not is_valid:
+    return jsonify({"error": f"Invalid tutorial section ID: {error_msg}"}), 400
+    
   keystroke = request.form['keystroke']
   consoleAction = request.form['consoleAction']
   consoleScrollAction = request.form['consoleScrollAction']
@@ -694,7 +893,9 @@ def upload_recording():
   try:
     db.session.merge(tutorial_section_detail)
     db.session.commit()
-  except:
+  except Exception as e:
+    db.session.rollback()
+    app.logger.error(f"Database error saving recording: {str(e)}, uuid: {g.uuid}")
     return jsonify({"message": "An error occurred saving the recording"}), 500
 
   log_data = {'tutorialId': tutorial_section_detail.tutorial_id, 'tutorialSectionId': tutorial_section_detail.id, 'tutorialSectionType': tutorial_section_detail.tutorial_type, 'action': 'Upload Tutorial Section', 'uuid': g.uuid}
@@ -712,6 +913,19 @@ def run_script(language):
 
   script = json.loads(data)
 
+  # Validate language
+  allowed_languages = ["python", "java", "javascript"]
+  if language not in allowed_languages:
+    return {"output": "Unsupported language"}, 400
+
+  # Validate script content
+  if not sanitize_script_content(script['data'], language):
+    return {"output": "Script content not allowed for security reasons"}, 400
+
+  # Validate filename if provided
+  if 'filename' in script and not validate_filename(script['filename']):
+    return {"output": "Invalid filename"}, 400
+
   id = uuid.uuid4().hex
 
   if language == "python":
@@ -721,8 +935,20 @@ def run_script(language):
   elif language == "javascript":
     pathName = "./script/" + id + ".js"
 
-  with open(pathName, 'wb') as f:
-    f.write(script['data'].encode())
+  # Ensure script directory exists and is secure
+  script_dir = "./script/"
+  if not os.path.exists(script_dir):
+    os.makedirs(script_dir, mode=0o755)
+
+  # Write file securely
+  try:
+    with open(pathName, 'wb') as f:
+      f.write(script['data'].encode())
+    # Set restrictive permissions
+    os.chmod(pathName, 0o644)
+  except (OSError, IOError) as e:
+    app.logger.error(f"File write error: {str(e)}, uuid: {g.uuid}")
+    return {"output": "Failed to create script file"}, 500
 
   if language == "python":
     cmd = "python " + id + ".py"
@@ -748,17 +974,29 @@ def run_script(language):
     else:
       os.killpg(p1.pid, signal.SIGTERM)
 
-    os.remove(pathName)
-    return {"output": format(e).replace(id, script['filename'])+"\r\n"}, 200
+    # Clean up file securely
+    try:
+      os.remove(pathName)
+    except OSError:
+      pass
+    filename_display = script.get('filename', 'script')
+    return {"output": f"Script execution timeout after 10 seconds"}, 200
 
-  os.remove(pathName)
+  # Clean up file securely
+  try:
+    os.remove(pathName)
+  except OSError:
+    pass
 
   if p1.returncode == 0:
     result = output.decode()
     if language == "java":
       result += "\r\n"
     return {"output": result, "time": timeDelta}, 200
-  return {"output": errors.decode().replace(id, script['filename'])}, 200
+  
+  filename_display = script.get('filename', 'script')
+  error_output = errors.decode().replace(id, filename_display)
+  return {"output": error_output}, 200
 
 
 @app.route("/tutorial_section/get/<string:TutorialSectionId>")
@@ -824,7 +1062,7 @@ def find_tutorial_section_by_id(TutorialSectionId):
     "version": version,
     "tutorial_id": tutorial_section_detail.tutorial_id,
     "frequent_word": tutorial_section_detail.frequent_word,
-    "sequence": eval(tutorial_detail.sequence).index(tutorial_section_detail.id) + 1,
+    "sequence": json.loads(tutorial_detail.sequence).index(tutorial_section_detail.id) + 1 if tutorial_detail.sequence else 1,
     "recording" : recordingResponse
   }
 
@@ -872,15 +1110,20 @@ def create_tutorial_section():
     duration=0,
   )
   
-  sequence = eval(tutorial_detail.sequence)
+  try:
+    sequence = json.loads(tutorial_detail.sequence) if tutorial_detail.sequence else []
+  except (json.JSONDecodeError, TypeError):
+    sequence = []
   sequence.append(unique_index)
-  tutorial_detail.sequence = str(sequence)
+  tutorial_detail.sequence = json.dumps(sequence)
 
   try:
     db.session.add(statement)
     db.session.merge(tutorial_detail)
     db.session.commit()
-  except:
+  except Exception as e:
+    db.session.rollback()
+    app.logger.error(f"Database error creating tutorial section: {str(e)}, uuid: {g.uuid}")
     return jsonify({"message": "An error occurred creating the tutorial section"}), 500
 
   log_data = {'tutorialId': tutorial_id, 'tutorialSectionId': unique_index, 'tutorialSectionType': tutorial_type, 'action': 'Create Tutorial Section', 'uuid': g.uuid}
@@ -950,7 +1193,12 @@ def update_tutorial_section(TutorialSectionId):
   try:
     transcriptResponse = s3.get_object(Bucket=s3_bucket_name, Key=TutorialSectionId + '/transcript.json')
     transcript = transcriptResponse['Body'].read().decode('utf-8')
-    transcript_array = eval(json.loads(transcript))
+    try:
+      transcript_data = json.loads(transcript)
+      transcript_array = transcript_data if isinstance(transcript_data, list) else []
+    except (json.JSONDecodeError, TypeError) as e:
+      app.logger.error(f"Failed to parse transcript: {e}")
+      transcript_array = []
     for sentence in transcript_array:
       full_transcript = full_transcript + sentence['text'] + " "
   except:
@@ -962,8 +1210,10 @@ def update_tutorial_section(TutorialSectionId):
   try:
     db.session.merge(tutorial_section_detail)
     db.session.commit()
-  except:
-    return jsonify({"message": "An error occurred creating the tutorial"}), 500
+  except Exception as e:
+    db.session.rollback()
+    app.logger.error(f"Database error updating tutorial section: {str(e)}, uuid: {g.uuid}")
+    return jsonify({"message": "An error occurred updating the tutorial section"}), 500
 
   log_data = {'tutorialId': tutorial_section_detail.tutorial_id, 'tutorialSectionId': TutorialSectionId, 'tutorialSectionType': tutorial_section_detail.tutorial_type, 'action': 'Save Tutorial Section', 'uuid': g.uuid}
   app.logger.info(str(log_data))
@@ -977,9 +1227,13 @@ def delete_tutorial_section_by_id(TutorialSectionId):
   try:
     tutorial_section = TutorialSection.query.filter_by(id=TutorialSectionId).first()
     tutorial = Tutorial.query.filter_by(id=tutorial_section.tutorial_id).first()
-    sequence = eval(tutorial.sequence)
-    sequence.remove(TutorialSectionId)
-    tutorial.sequence = str(sequence)
+    try:
+      sequence = json.loads(tutorial.sequence) if tutorial.sequence else []
+    except (json.JSONDecodeError, TypeError):
+      sequence = []
+    if TutorialSectionId in sequence:
+      sequence.remove(TutorialSectionId)
+    tutorial.sequence = json.dumps(sequence)
 
     try:
       response = s3.list_objects_v2(Bucket=s3_bucket_name, Prefix=TutorialSectionId + "/")
@@ -1055,7 +1309,12 @@ def search_keyword(Keyword, TutorialSectionID):
   try:
     transcriptResponse = s3.get_object(Bucket=s3_bucket_name, Key=TutorialSectionID + '/transcript.json')
     transcript = transcriptResponse['Body'].read().decode('utf-8')
-    transcript_array = eval(json.loads(transcript))
+    try:
+      transcript_data = json.loads(transcript)
+      transcript_array = transcript_data if isinstance(transcript_data, list) else []
+    except (json.JSONDecodeError, TypeError) as e:
+      app.logger.error(f"Failed to parse transcript: {e}")
+      transcript_array = []
     print(transcript_array)
     for sentence in transcript_array:
       if (Keyword.lower() in sentence['text'].lower()):
