@@ -115,7 +115,10 @@ EXIT;
 
 ### 5. Environment Configuration
 
-Create a `.env` file in the root directory:
+The system supports three storage configuration modes. Choose the `.env` file that matches your deployment needs:
+
+#### Option A: Local Storage Only (Recommended for Development)
+Create `.env` file based on `.env.local.example`:
 ```env
 # Database Configuration
 SQLALCHEMY_DATABASE_URI=mysql+mysqlconnector://itss_user:secure_password@localhost:3306/interactive_tutorial_system
@@ -127,7 +130,54 @@ APP_SECRET_KEY=your-super-secure-secret-key-min-32-characters
 GOOGLE_CLIENT_ID=your-google-client-id
 GOOGLE_CLIENT_SECRET=your-google-client-secret
 
-# AWS S3 Configuration
+# Storage Configuration - Local Only
+STORAGE_TYPE=local
+
+# Service URLs
+REACT_APP_TUTORIAL_URL=http://localhost:5002
+REACT_APP_AUTH_URL=http://localhost:5001
+```
+
+#### Option B: AWS S3 Storage Only (Production)
+Create `.env` file based on `.env.s3.example`:
+```env
+# Database Configuration
+SQLALCHEMY_DATABASE_URI=mysql+mysqlconnector://itss_user:secure_password@localhost:3306/interactive_tutorial_system
+
+# Security Configuration
+APP_SECRET_KEY=your-super-secure-secret-key-min-32-characters
+
+# Google OAuth Configuration
+GOOGLE_CLIENT_ID=your-google-client-id
+GOOGLE_CLIENT_SECRET=your-google-client-secret
+
+# Storage Configuration - S3 Only
+STORAGE_TYPE=s3
+ACCESS_KEY_ID=your-aws-access-key-id
+SECRET_ACCESS_KEY=your-aws-secret-access-key
+S3_BUCKET_NAME=itss-recordings-bucket
+S3_LEARNER_BUCKET_NAME=itss-layouts-bucket
+
+# Service URLs
+REACT_APP_TUTORIAL_URL=http://localhost:5002
+REACT_APP_AUTH_URL=http://localhost:5001
+```
+
+#### Option C: Hybrid Storage (S3 with Local Fallback)
+Create `.env` file based on `.env.hybrid.example`:
+```env
+# Database Configuration
+SQLALCHEMY_DATABASE_URI=mysql+mysqlconnector://itss_user:secure_password@localhost:3306/interactive_tutorial_system
+
+# Security Configuration
+APP_SECRET_KEY=your-super-secure-secret-key-min-32-characters
+
+# Google OAuth Configuration
+GOOGLE_CLIENT_ID=your-google-client-id
+GOOGLE_CLIENT_SECRET=your-google-client-secret
+
+# Storage Configuration - Hybrid Mode
+STORAGE_TYPE=auto
 ACCESS_KEY_ID=your-aws-access-key-id
 SECRET_ACCESS_KEY=your-aws-secret-access-key
 S3_BUCKET_NAME=itss-recordings-bucket
@@ -181,11 +231,11 @@ server/
 ├── tutorial/             # Tutorial service
 │   ├── application.py    # Flask app for tutorials
 │   ├── schema.py         # Tutorial database models
-│   └── requirements.txt  # Tutorial-specific dependencies
-├── utils/                # Utility functions & storage backends
-│   ├── storage_backend.py # Hybrid storage system (S3 + Local)
-│   ├── file_server.py    # Local file serving routes
-│   └── local_storage.py  # Local storage utilities
+│   ├── requirements.txt  # Tutorial-specific dependencies
+│   └── utils/            # Tutorial utilities & storage backends
+│       ├── storage_backend.py # Hybrid storage system (S3 + Local)
+│       ├── file_server.py    # Local file serving routes
+│       └── local_storage.py  # Local storage utilities
 ├── storage/              # Local file storage (NEW)
 │   ├── recordings/       # Audio & tutorial files
 │   └── layouts/          # User layout preferences
@@ -238,17 +288,41 @@ PYTHONPATH=. STORAGE_TYPE=local python3 tutorial/application.py
 ```
 
 ### 🗂️ Storage Configuration
-The system now supports **hybrid storage** with automatic S3 to local migration:
+The system supports **three storage backends** for maximum flexibility:
 
-- **Local Storage**: Files stored in `storage/recordings/` and `storage/layouts/`
-- **S3 Storage**: Original cloud storage (maintained for backup)
-- **Migration Tools**: Scripts available for S3 ↔ Local data transfer
+#### 1. Local Storage (`STORAGE_TYPE=local`)
+- **Best for**: Development, small deployments, cost optimization
+- **Files stored in**: `storage/recordings/` and `storage/layouts/`
+- **Advantages**: No AWS costs, faster access, simple setup
+- **Use when**: Developing locally or want to avoid cloud costs
 
-Set storage type with environment variable:
+#### 2. AWS S3 Storage (`STORAGE_TYPE=s3`)
+- **Best for**: Production, distributed teams, scalability
+- **Files stored in**: AWS S3 buckets configured in `.env`
+- **Advantages**: Scalable, distributed access, cloud backup
+- **Use when**: Production deployment or distributed development
+
+#### 3. Hybrid Mode (`STORAGE_TYPE=auto`)
+- **Best for**: Migration scenarios, high availability
+- **Behavior**: Tries S3 first, automatically falls back to local storage
+- **Advantages**: Seamless migration, fault tolerance
+- **Use when**: Migrating from S3 to local or want redundancy
+
+#### Configuration Examples:
 ```bash
-STORAGE_TYPE=local    # Use local file storage
-STORAGE_TYPE=s3       # Use AWS S3 storage  
-STORAGE_TYPE=auto     # Auto-detect (S3 first, local fallback)
+# Local only (development)
+STORAGE_TYPE=local
+
+# S3 only (production)  
+STORAGE_TYPE=s3
+ACCESS_KEY_ID=your-aws-access-key
+SECRET_ACCESS_KEY=your-aws-secret-key
+S3_BUCKET_NAME=itss-recordings-bucket
+S3_LEARNER_BUCKET_NAME=itss-layouts-bucket
+
+# Hybrid (migration/fallback)
+STORAGE_TYPE=auto
+# Include both local and S3 config above
 ```
 
 ### 🏭 Production Mode
@@ -390,16 +464,28 @@ STORAGE_TYPE=auto     # Auto-detect (tries S3 first, falls back to local)
 ```
 
 ### Migration Commands
+The migration tools are located in the `docs/` folder:
+
 ```bash
 # Migrate all S3 files to local storage
-python3 migrate_s3_to_local_full.py
+python3 docs/migrate_s3_to_local_full.py
 
-# Migrate specific tutorials
-python3 migrate_specific_tutorials.py
+# Migrate specific tutorials listed in target_tutorials.json
+python3 docs/migrate_specific_tutorials.py
 
-# Test local storage health
-python3 test_local_storage.py
+# Test local storage backend health
+python3 docs/test_local_storage.py
+
+# View migration reports
+cat docs/migration_report_*.json
 ```
+
+#### Migration Process:
+1. **Backup**: Always backup your database before migration
+2. **Test**: Run `docs/test_local_storage.py` to verify local storage works
+3. **Migrate**: Use appropriate migration script for your needs
+4. **Verify**: Check migration reports for any failed transfers
+5. **Switch**: Update `STORAGE_TYPE` in `.env` after successful migration
 
 ### Local Storage Structure
 ```
