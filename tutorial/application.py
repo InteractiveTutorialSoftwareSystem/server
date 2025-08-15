@@ -28,8 +28,8 @@ from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize
 
 # Import hybrid storage system
-from utils.storage_backend import get_storage_manager
-from utils.file_server import register_file_routes, create_file_upload_handler
+from tutorial.utils.storage_backend import get_storage_manager
+from tutorial.utils.file_server import register_file_routes, create_file_upload_handler
 
 # Input validation helpers
 def validate_string_input(value, max_length=320, allow_empty=False):
