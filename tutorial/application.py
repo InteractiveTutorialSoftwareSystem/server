@@ -1,7 +1,6 @@
-from flask import Flask, request, jsonify, g
+from flask import Flask, request, jsonify, g, Response, redirect
 import flask_sqlalchemy
 import flask_cors
-import boto3
 import base64
 import os
 import time
@@ -15,7 +14,7 @@ import re
 from decouple import config
 from logging.handlers import RotatingFileHandler
 import platform
-from schema import Tutorial, TutorialSection, User, UserTutorialState, db
+from tutorial.schema import Tutorial, TutorialSection, User, UserTutorialState, db
 from sqlalchemy import or_, and_
 from collections import Counter
 from datetime import datetime
@@ -27,6 +26,10 @@ nltk.download('stopwords')
 nltk.download('punkt')
 from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize
+
+# Import hybrid storage system
+from utils.storage_backend import get_storage_manager
+from utils.file_server import register_file_routes, create_file_upload_handler
 
 # Input validation helpers
 def validate_string_input(value, max_length=320, allow_empty=False):
@@ -108,22 +111,22 @@ handler = RotatingFileHandler('application.log')
 handler.setFormatter(formatter)
 application.logger.addHandler(handler)
 
-access_key_id = config("ACCESS_KEY_ID")
-secret_access_key = config("SECRET_ACCESS_KEY")
-s3_bucket_name = config("S3_BUCKET_NAME")
-s3_learner_bucket_name = config("S3_LEARNER_BUCKET_NAME")
+# Initialize hybrid storage system
+storage = get_storage_manager()
 
-s3 = boto3.client(
-  's3',
-  aws_access_key_id = access_key_id,
-  aws_secret_access_key = secret_access_key
-)
+# Register file serving routes for local storage
+register_file_routes(application)
 
-s3_resource = boto3.resource(
-  's3',
-  aws_access_key_id = access_key_id,
-  aws_secret_access_key = secret_access_key
-)
+# Create file upload handler with validation
+upload_handler = create_file_upload_handler()
+
+# Log storage backend information
+backend_info = storage.get_backend_info()
+logger.info(f"Storage backend initialized: {backend_info}")
+
+# Legacy S3 configuration (for backward compatibility during transition)
+# These will be automatically used by the storage backend if configured
+# No need to create s3 client directly anymore
 
 @app.before_request
 def before_request_func():
@@ -352,9 +355,11 @@ def create_tutorial_sample():
   statements.append(tutorial_statement)
 
   for i in range(len(sample_tutorial_page_ids)):
-    response = s3.list_objects_v2(Bucket=s3_bucket_name, Prefix=sample_tutorial_page_ids[i] + "/")
-    for object in response['Contents']:
-      s3_resource.meta.client.copy({'Bucket': s3_bucket_name, 'Key': object['Key']}, s3_bucket_name, tutorial_page_ids[i]+'/'+object["Key"].split("/")[-1])
+    # Copy tutorial section files using hybrid storage
+    success = storage.copy_recording_section(sample_tutorial_page_ids[i], tutorial_page_ids[i])
+    if not success:
+      logger.warning(f"Failed to copy tutorial section {sample_tutorial_page_ids[i]} to {tutorial_page_ids[i]}")
+      # Continue anyway as this might be a new section with no files yet
     sample_tutorial_page_details = TutorialSection.query.filter_by(id=sample_tutorial_page_ids[i]).first()
     tutorial_page_statement = TutorialSection(
       id=tutorial_page_ids[i], 
@@ -408,82 +413,81 @@ def getTutorialPageDetails(TutorialId, PageId, UserId):
 
   if tutorial_page_type == "Code":
     try:
-      descriptionResponse = s3.get_object(Bucket=s3_bucket_name, Key=tutorial_page_details.id + '/description.md')
-      description = descriptionResponse['Body'].read().decode('utf-8')
+      description_content = storage.get_recording_file(tutorial_page_details.id, 'description.md')
+      description = description_content.decode('utf-8') if description_content else None
     except Exception as e:
       app.logger.warning(f"Failed to load description: {e}")
       description = None
 
     try:
-      keystrokeResponse = s3.get_object(Bucket=s3_bucket_name, Key=tutorial_page_details.id + '/keystroke.json')
-      keystroke = keystrokeResponse['Body'].read().decode('utf-8')
+      keystroke_content = storage.get_recording_file(tutorial_page_details.id, 'keystroke.json')
+      keystroke = keystroke_content.decode('utf-8') if keystroke_content else None
     except Exception as e:
       app.logger.warning(f"Failed to load keystroke: {e}")
       keystroke = None
 
     try:
-      consoleActionResponse = s3.get_object(Bucket=s3_bucket_name, Key=tutorial_page_details.id + '/consoleAction.json')
-      consoleAction = consoleActionResponse['Body'].read().decode('utf-8')
+      console_action_content = storage.get_recording_file(tutorial_page_details.id, 'consoleAction.json')
+      consoleAction = console_action_content.decode('utf-8') if console_action_content else None
     except:
       consoleAction = None
 
     try:
-      consoleScrollActionResponse = s3.get_object(Bucket=s3_bucket_name, Key=tutorial_page_details.id +'/consoleScrollAction.json')
-      consoleScrollAction = consoleScrollActionResponse['Body'].read().decode('utf-8')
+      console_scroll_content = storage.get_recording_file(tutorial_page_details.id, 'consoleScrollAction.json')
+      consoleScrollAction = console_scroll_content.decode('utf-8') if console_scroll_content else "\"[{\\\"timestamp\\\":0,\\\"scroll\\\":0}]\""
     except:
       consoleScrollAction = "\"[{\\\"timestamp\\\":0,\\\"scroll\\\":0}]\""
 
     try:
-      inputKeystrokesResponse = s3.get_object(Bucket=s3_bucket_name, Key=tutorial_page_details.id + '/inputKeystrokes.json')
-      inputKeystrokes = inputKeystrokesResponse['Body'].read().decode('utf-8')
+      input_keystrokes_content = storage.get_recording_file(tutorial_page_details.id, 'inputKeystrokes.json')
+      inputKeystrokes = input_keystrokes_content.decode('utf-8') if input_keystrokes_content else None
     except:
       inputKeystrokes = None
 
     try:
-      inputScrollActionResponse = s3.get_object(Bucket=s3_bucket_name, Key=tutorial_page_details.id +'/inputScrollAction.json')
-      inputScrollAction = inputScrollActionResponse['Body'].read().decode('utf-8')
+      input_scroll_content = storage.get_recording_file(tutorial_page_details.id, 'inputScrollAction.json')
+      inputScrollAction = input_scroll_content.decode('utf-8') if input_scroll_content else "\"[{\\\"timestamp\\\":0,\\\"scroll\\\":0}]\""
     except:
       inputScrollAction = "\"[{\\\"timestamp\\\":0,\\\"scroll\\\":0}]\""
 
     try:
-      layoutActionResponse = s3.get_object(Bucket=s3_bucket_name, Key=tutorial_page_details.id + '/layoutAction.json')
-      layoutAction = layoutActionResponse['Body'].read().decode('utf-8')
+      layout_action_content = storage.get_recording_file(tutorial_page_details.id, 'layoutAction.json')
+      layoutAction = layout_action_content.decode('utf-8') if layout_action_content else None
     except:
       layoutAction = None
 
     try:
-      selectActionResponse = s3.get_object(Bucket=s3_bucket_name, Key=tutorial_page_details.id + '/selectAction.json')
-      selectAction = selectActionResponse['Body'].read().decode('utf-8')
+      select_action_content = storage.get_recording_file(tutorial_page_details.id, 'selectAction.json')
+      selectAction = select_action_content.decode('utf-8') if select_action_content else None
     except:
       selectAction = None
 
     try:
-      scrollActionResponse = s3.get_object(Bucket=s3_bucket_name, Key=tutorial_page_details.id + '/scrollAction.json')
-      scrollAction = scrollActionResponse['Body'].read().decode('utf-8')
+      scroll_action_content = storage.get_recording_file(tutorial_page_details.id, 'scrollAction.json')
+      scrollAction = scroll_action_content.decode('utf-8') if scroll_action_content else None
     except:
       scrollAction = None
 
     try:
-      editorScrollActionResponse = s3.get_object(Bucket=s3_bucket_name, Key=tutorial_page_details.id +'/editorScrollAction.json')
-      editorScrollAction = editorScrollActionResponse['Body'].read().decode('utf-8')
+      editor_scroll_content = storage.get_recording_file(tutorial_page_details.id, 'editorScrollAction.json')
+      editorScrollAction = editor_scroll_content.decode('utf-8') if editor_scroll_content else "\"[{\\\"timestamp\\\":0,\\\"scroll\\\":0}]\""
     except:
       editorScrollAction = "\"[{\\\"timestamp\\\":0,\\\"scroll\\\":0}]\""
 
 
     try:
-      transcriptResponse = s3.get_object(Bucket=s3_bucket_name, Key=tutorial_page_details.id + '/transcript.json')
-      transcript = transcriptResponse['Body'].read().decode('utf-8')
+      transcript_content = storage.get_recording_file(tutorial_page_details.id, 'transcript.json')
+      transcript = transcript_content.decode('utf-8') if transcript_content else None
     except:
       transcript = None
 
     try:
-      recordingResponse = s3.get_object(Bucket=s3_bucket_name, Key=tutorial_page_details.id + '/recording.wav')
-      recordingResponse = s3.generate_presigned_url('get_object',
-        Params={
-            'Bucket': s3_bucket_name,
-            'Key': tutorial_page_details.id + '/recording.wav'
-        },
-        ExpiresIn=21600)
+      # Generate URL for recording file (works for both S3 and local)
+      recordingResponse = storage.get_file_url(tutorial_page_details.id, 'recording.wav', expires_in=21600)
+      # For local storage, prepend base URL
+      if storage.get_backend_type() == 'local' and recordingResponse:
+        base_url = config("REACT_APP_TUTORIAL_URL", default="http://localhost:5002")
+        recordingResponse = f"{base_url}{recordingResponse}"
     except:
       recordingResponse = None
 
@@ -540,8 +544,8 @@ def getTutorialPageDetails(TutorialId, PageId, UserId):
 
   if tutorial_page_type == "Question":
     try:
-      questionResponse = s3.get_object(Bucket=s3_bucket_name, Key=tutorial_page_details.id + '/question.json')
-      question = questionResponse['Body'].read().decode('utf-8')
+      question_data = storage.get_recording_file(tutorial_page_details.id, 'question.json')
+      question = question_data.decode('utf-8') if question_data else None
     except:
       question = None
     
@@ -606,11 +610,9 @@ def delete_tutorial_by_id(TutorialId):
     tutorial_sections = TutorialSection.query.filter_by(tutorial_id=TutorialId).all()
     try:
       for tutorial_section in tutorial_sections:
-        response = s3.list_objects_v2(Bucket=s3_bucket_name, Prefix=tutorial_section.id + "/")
-        for object in response['Contents']:
-          s3.delete_object(Bucket=s3_bucket_name, Key=object['Key'])
+        storage.delete_recording_section(tutorial_section.id)
     except:
-      print('no file in s3')
+      print('no file in storage')
     tutorial_section = TutorialSection.query.filter_by(tutorial_id=TutorialId).delete()
     user_tutorial_state = UserTutorialState.query.filter_by(tutorial_id=TutorialId).delete()
     tutorial = Tutorial.query.filter_by(id=TutorialId).delete()
@@ -725,9 +727,7 @@ def upload_recording():
     tutorial_section_detail.duration = request.form["duration"]
 
   try:
-    response = s3.list_objects_v2(Bucket=s3_bucket_name, Prefix=tutorial_section_id + "/")
-    for object in response['Contents']:
-      s3.delete_object(Bucket=s3_bucket_name, Key=object['Key'])
+    storage.delete_recording_section(tutorial_section_id)
   except:
     pass
 
@@ -739,8 +739,8 @@ def upload_recording():
       f.write(request.form["description"].encode())
 
     with open("./" + filename, "rb") as readfile:
-      upload_path = tutorial_section_id + "/" + filename
-      s3.upload_fileobj(readfile, s3_bucket_name, upload_path)
+      content = readfile.read()
+      storage.save_recording_file(tutorial_section_id, filename, content)
     
     os.remove("./" + filename)
   
@@ -751,8 +751,8 @@ def upload_recording():
       f.write(request.form["code_content"].encode())
 
     with open("./" + filename, "rb") as readfile:
-      upload_path = tutorial_section_id + "/" + filename
-      s3.upload_fileobj(readfile, s3_bucket_name, upload_path)
+      content = readfile.read()
+      storage.save_recording_file(tutorial_section_id, filename, content)
     
     os.remove("./" + filename)
 
@@ -765,8 +765,8 @@ def upload_recording():
       f.write(recording_data)
 
     with open("./" + recording_filename, "rb") as readfile:
-      upload_path = tutorial_section_id + "/" + recording_filename
-      s3.upload_fileobj(readfile, s3_bucket_name, upload_path)
+      content = readfile.read()
+      storage.save_recording_file(tutorial_section_id, recording_filename, content)
 
     os.remove("./" + recording_filename)
 
@@ -776,8 +776,8 @@ def upload_recording():
     f.write(json.dumps(keystroke).encode())
 
   with open("./" + keystroke_filename, "rb") as readfile:
-    upload_path = tutorial_section_id + "/" + keystroke_filename
-    s3.upload_fileobj(readfile, s3_bucket_name, upload_path)
+    content = readfile.read()
+    storage.save_recording_file(tutorial_section_id, keystroke_filename, content)
   
   os.remove("./" + keystroke_filename)
 
@@ -787,8 +787,8 @@ def upload_recording():
     f.write(json.dumps(inputKeystrokes).encode())
 
   with open("./"+ inputKeystroke_filename, 'rb') as readfile:
-    upload_path = tutorial_section_id+"/"+inputKeystroke_filename
-    s3.upload_fileobj(readfile, s3_bucket_name, upload_path)
+    content = readfile.read()
+    storage.save_recording_file(tutorial_section_id, inputKeystroke_filename, content)
 
   os.remove('./'+inputKeystroke_filename)
 
@@ -798,8 +798,8 @@ def upload_recording():
     f.write(json.dumps(inputScrollAction).encode())
   
   with open('./' + inputScrollAction_filename, 'rb') as readfile:
-    upload_path = tutorial_section_id+'/'+inputScrollAction_filename
-    s3.upload_fileobj(readfile,s3_bucket_name,upload_path)
+    content = readfile.read()
+    storage.save_recording_file(tutorial_section_id, inputScrollAction_filename, content)
 
   os.remove('./'+inputScrollAction_filename)
 
@@ -809,8 +809,8 @@ def upload_recording():
     f.write(json.dumps(consoleAction).encode())
 
   with open("./" + consoleAction_filename, "rb") as readfile:
-    upload_path = tutorial_section_id + "/" + consoleAction_filename
-    s3.upload_fileobj(readfile, s3_bucket_name, upload_path)
+    content = readfile.read()
+    storage.save_recording_file(tutorial_section_id, consoleAction_filename, content)
   
   os.remove("./" + consoleAction_filename)
 
@@ -820,8 +820,8 @@ def upload_recording():
     f.write(json.dumps(consoleScrollAction).encode())
   
   with open('./'+ consoleScrollAction_filename, 'rb') as readfile:
-    upload_path = tutorial_section_id+"/" +consoleScrollAction_filename
-    s3.upload_fileobj(readfile, s3_bucket_name, upload_path)
+    content = readfile.read()
+    storage.save_recording_file(tutorial_section_id, consoleScrollAction_filename, content)
   
   os.remove('./' + consoleScrollAction_filename)
 
@@ -831,8 +831,8 @@ def upload_recording():
     f.write(json.dumps(layoutAction).encode())
 
   with open("./" + layoutAction_filename, "rb") as readfile:
-    upload_path = tutorial_section_id + "/" + layoutAction_filename
-    s3.upload_fileobj(readfile, s3_bucket_name, upload_path)
+    content = readfile.read()
+    storage.save_recording_file(tutorial_section_id, layoutAction_filename, content)
   
   os.remove("./" + layoutAction_filename)
 
@@ -842,8 +842,8 @@ def upload_recording():
     f.write(json.dumps(scrollAction).encode())
 
   with open("./" + scrollAction_filename, "rb") as readfile:
-    upload_path = tutorial_section_id + "/" + scrollAction_filename
-    s3.upload_fileobj(readfile, s3_bucket_name, upload_path)
+    content = readfile.read()
+    storage.save_recording_file(tutorial_section_id, scrollAction_filename, content)
   
   os.remove("./" + scrollAction_filename)
 
@@ -853,8 +853,8 @@ def upload_recording():
     f.write(json.dumps(editorScrollAction).encode())
   
   with open("./" + editorScrollAction_filename, "rb") as readfile:
-    upload_path = tutorial_section_id + "/" + editorScrollAction_filename
-    s3.upload_fileobj(readfile, s3_bucket_name, upload_path)
+    content = readfile.read()
+    storage.save_recording_file(tutorial_section_id, editorScrollAction_filename, content)
 
   os.remove("./"+editorScrollAction_filename)
 
@@ -864,8 +864,8 @@ def upload_recording():
     f.write(json.dumps(selectAction).encode())
 
   with open("./" + selectAction_filename, "rb") as readfile:
-    upload_path = tutorial_section_id + "/" + selectAction_filename
-    s3.upload_fileobj(readfile, s3_bucket_name, upload_path)
+    content = readfile.read()
+    storage.save_recording_file(tutorial_section_id, selectAction_filename, content)
   
   os.remove("./" + selectAction_filename)
 
@@ -882,8 +882,8 @@ def upload_recording():
       f.write(json.dumps(transcript).encode())
 
     with open("./" + transcript_filename, "rb") as readfile:
-      upload_path = tutorial_section_id + "/" + transcript_filename
-      s3.upload_fileobj(readfile, s3_bucket_name, upload_path)
+      content = readfile.read()
+      storage.save_recording_file(tutorial_section_id, transcript_filename, content)
     
     os.remove("./" + transcript_filename)
   
@@ -1007,20 +1007,20 @@ def find_tutorial_section_by_id(TutorialSectionId):
   tutorial_section_detail = TutorialSection.query.filter_by(id=TutorialSectionId).first()
 
   try:
-    descriptionResponse = s3.get_object(Bucket=s3_bucket_name, Key=TutorialSectionId + '/description.md')
-    description = descriptionResponse['Body'].read().decode('utf-8')
+    description_data = storage.get_recording_file(TutorialSectionId, 'description.md')
+    description = description_data.decode('utf-8') if description_data else None
   except:
     description = None
 
   try:
-    codeContentResponse = s3.get_object(Bucket=s3_bucket_name, Key=TutorialSectionId + '/code_content.txt')
-    code_content = codeContentResponse['Body'].read().decode('utf-8')
+    code_content_data = storage.get_recording_file(TutorialSectionId, 'code_content.txt')
+    code_content = code_content_data.decode('utf-8') if code_content_data else None
   except:
     code_content = None
 
   try:
-    questionResponse = s3.get_object(Bucket=s3_bucket_name, Key=TutorialSectionId + '/question.json')
-    question = questionResponse['Body'].read().decode('utf-8')
+    question_data = storage.get_recording_file(TutorialSectionId, 'question.json')
+    question = question_data.decode('utf-8') if question_data else None
   except:
     question = None
 
@@ -1040,13 +1040,7 @@ def find_tutorial_section_by_id(TutorialSectionId):
     version = None
 
   try:
-    recordingResponse = s3.get_object(Bucket=s3_bucket_name, Key=tutorial_section_detail.id + '/recording.wav')
-    recordingResponse = s3.generate_presigned_url('get_object',
-      Params={
-          'Bucket': s3_bucket_name,
-          'Key': tutorial_section_detail.id + '/recording.wav'
-      },
-      ExpiresIn=21600)
+    recordingResponse = storage.get_file_url(tutorial_section_detail.id, 'recording.wav', expires_in=21600)
   except:
     recordingResponse = None
 
@@ -1160,8 +1154,8 @@ def update_tutorial_section(TutorialSectionId):
       f.write(data["description"].encode())
 
     with open("./" + filename, "rb") as readfile:
-      upload_path = TutorialSectionId + "/" + filename
-      s3.upload_fileobj(readfile, s3_bucket_name, upload_path)
+      content = readfile.read()
+      storage.save_recording_file(TutorialSectionId, filename, content)
     
     os.remove("./" + filename)
   
@@ -1172,8 +1166,8 @@ def update_tutorial_section(TutorialSectionId):
       f.write(data["code_content"].encode())
 
     with open("./" + filename, "rb") as readfile:
-      upload_path = TutorialSectionId + "/" + filename
-      s3.upload_fileobj(readfile, s3_bucket_name, upload_path)
+      content = readfile.read()
+      storage.save_recording_file(TutorialSectionId, filename, content)
     
     os.remove("./" + filename)
 
@@ -1184,18 +1178,18 @@ def update_tutorial_section(TutorialSectionId):
       f.write(json.dumps(data["question"]).encode())
 
     with open("./" + filename, "rb") as readfile:
-      upload_path = TutorialSectionId + "/" + filename
-      s3.upload_fileobj(readfile, s3_bucket_name, upload_path)
+      content = readfile.read()
+      storage.save_recording_file(TutorialSectionId, filename, content)
     
     os.remove("./" + filename)
 
   # TO:DO handle transcript
   try:
-    transcriptResponse = s3.get_object(Bucket=s3_bucket_name, Key=TutorialSectionId + '/transcript.json')
-    transcript = transcriptResponse['Body'].read().decode('utf-8')
+    transcript_data = storage.get_recording_file(TutorialSectionId, 'transcript.json')
+    transcript = transcript_data.decode('utf-8') if transcript_data else None
     try:
-      transcript_data = json.loads(transcript)
-      transcript_array = transcript_data if isinstance(transcript_data, list) else []
+      transcript_json = json.loads(transcript)
+      transcript_array = transcript_json if isinstance(transcript_json, list) else []
     except (json.JSONDecodeError, TypeError) as e:
       app.logger.error(f"Failed to parse transcript: {e}")
       transcript_array = []
@@ -1236,11 +1230,9 @@ def delete_tutorial_section_by_id(TutorialSectionId):
     tutorial.sequence = json.dumps(sequence)
 
     try:
-      response = s3.list_objects_v2(Bucket=s3_bucket_name, Prefix=TutorialSectionId + "/")
-      for object in response['Contents']:
-        s3.delete_object(Bucket=s3_bucket_name, Key=object['Key'])
+      storage.delete_recording_section(TutorialSectionId)
     except:
-      print("No file in S3/Failed to delete in S3")
+      print("No file in storage/Failed to delete in storage")
 
     tutorial_section = TutorialSection.query.filter_by(id=TutorialSectionId).delete()
 
@@ -1270,8 +1262,8 @@ def save_learner_layout():
     f.write(json.dumps(layout).encode())
 
   with open("./" + layout_filename, "rb") as readfile:
-    upload_path = userid + "/" + tutorialid + "/" + role + "/" + layout_filename
-    s3.upload_fileobj(readfile, s3_learner_bucket_name, upload_path)
+    content = readfile.read()
+    storage.save_user_layout(userid, tutorialid, role, content)
 
   os.remove("./" + layout_filename)
 
@@ -1291,8 +1283,8 @@ def get_learner_layout():
 
   # Layout upload
   try:
-    LayoutResponse = s3.get_object(Bucket=s3_learner_bucket_name, Key=userid + "/" + tutorialid + "/" + role + '/layout.json')
-    layout = LayoutResponse['Body'].read().decode('utf-8')
+    layout_data = storage.get_user_layout(userid, tutorialid, role)
+    layout = layout_data.decode('utf-8') if layout_data else None
   except:
     layout = None
 
@@ -1307,11 +1299,11 @@ def search_keyword(Keyword, TutorialSectionID):
   """
   result = []
   try:
-    transcriptResponse = s3.get_object(Bucket=s3_bucket_name, Key=TutorialSectionID + '/transcript.json')
-    transcript = transcriptResponse['Body'].read().decode('utf-8')
+    transcript_data = storage.get_recording_file(TutorialSectionID, 'transcript.json')
+    transcript = transcript_data.decode('utf-8') if transcript_data else None
     try:
-      transcript_data = json.loads(transcript)
-      transcript_array = transcript_data if isinstance(transcript_data, list) else []
+      transcript_json = json.loads(transcript)
+      transcript_array = transcript_json if isinstance(transcript_json, list) else []
     except (json.JSONDecodeError, TypeError) as e:
       app.logger.error(f"Failed to parse transcript: {e}")
       transcript_array = []

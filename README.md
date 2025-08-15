@@ -176,12 +176,22 @@ Example `cors-config.json`:
 server/
 ├── auth/                 # Authentication service
 │   ├── application.py    # Flask app for auth
+│   ├── schema.py         # Auth database models
 │   └── requirements.txt  # Auth-specific dependencies
 ├── tutorial/             # Tutorial service
 │   ├── application.py    # Flask app for tutorials
+│   ├── schema.py         # Tutorial database models
 │   └── requirements.txt  # Tutorial-specific dependencies
-├── models/               # Database models
-├── utils/                # Utility functions
+├── utils/                # Utility functions & storage backends
+│   ├── storage_backend.py # Hybrid storage system (S3 + Local)
+│   ├── file_server.py    # Local file serving routes
+│   └── local_storage.py  # Local storage utilities
+├── storage/              # Local file storage (NEW)
+│   ├── recordings/       # Audio & tutorial files
+│   └── layouts/          # User layout preferences
+├── start_servers.sh      # Quick start script (NEW)
+├── stop_servers.sh       # Stop all servers script (NEW)
+├── SERVER_COMMANDS.md    # Standardized commands guide (NEW)
 ├── reset_schema.py       # Database schema setup
 ├── requirements.txt      # Global dependencies
 └── .env                  # Environment variables
@@ -203,31 +213,57 @@ The backend consists of two microservices:
 
 ## Running the Application
 
-### Development Mode
+### 🚀 Quick Start (Recommended)
 ```bash
+# Start all backend servers with one command
+cd /path/to/server
+./start_servers.sh
+
+# Stop all servers
+./stop_servers.sh
+```
+
+### 📋 Manual Development Mode
+All commands run from the server root directory:
+```bash
+cd /path/to/server
+
 # Terminal 1: Start authentication service
-cd auth
-python application.py
+PYTHONPATH=. python3 auth/application.py
 # Runs on http://localhost:5001
 
-# Terminal 2: Start tutorial service  
-cd tutorial
-python application.py
+# Terminal 2: Start tutorial service (with local storage)
+PYTHONPATH=. STORAGE_TYPE=local python3 tutorial/application.py
 # Runs on http://localhost:5002
 ```
 
-### Production Mode
+### 🗂️ Storage Configuration
+The system now supports **hybrid storage** with automatic S3 to local migration:
+
+- **Local Storage**: Files stored in `storage/recordings/` and `storage/layouts/`
+- **S3 Storage**: Original cloud storage (maintained for backup)
+- **Migration Tools**: Scripts available for S3 ↔ Local data transfer
+
+Set storage type with environment variable:
+```bash
+STORAGE_TYPE=local    # Use local file storage
+STORAGE_TYPE=s3       # Use AWS S3 storage  
+STORAGE_TYPE=auto     # Auto-detect (S3 first, local fallback)
+```
+
+### 🏭 Production Mode
 ```bash
 # Using gunicorn for production
 pip install gunicorn
 
-# Start auth service
-cd auth
-gunicorn --bind 0.0.0.0:5001 application:app
+# Start from server root directory
+cd /path/to/server
 
-# Start tutorial service
-cd tutorial
-gunicorn --bind 0.0.0.0:5002 application:app
+# Start auth service
+PYTHONPATH=. gunicorn --bind 0.0.0.0:5001 auth.application:app
+
+# Start tutorial service  
+PYTHONPATH=. STORAGE_TYPE=local gunicorn --bind 0.0.0.0:5002 tutorial.application:app
 ```
 
 ### Docker Deployment
@@ -333,6 +369,55 @@ Stores individual tutorial section content.
 |tutorial_type|String(20)|NULL|'Code' or 'Question'|
 |recording|TEXT|NULL|Audio recording data|
 |question|TEXT|NULL|Quiz questions (JSON)|
+
+## 🗄️ Hybrid Storage System
+
+### Overview
+The system now supports both **AWS S3** and **Local File Storage** with automatic migration capabilities:
+
+- **Hybrid Backend**: Seamlessly switch between S3 and local storage
+- **Migration Tools**: One-click migration from S3 to local storage
+- **Cost Optimization**: Reduce AWS costs by using local storage
+- **Performance**: Faster file access with local storage
+- **Reliability**: Local backup of all S3 data
+
+### Storage Types
+```bash
+# Environment variable options
+STORAGE_TYPE=local    # Use local file storage only
+STORAGE_TYPE=s3       # Use AWS S3 storage only  
+STORAGE_TYPE=auto     # Auto-detect (tries S3 first, falls back to local)
+```
+
+### Migration Commands
+```bash
+# Migrate all S3 files to local storage
+python3 migrate_s3_to_local_full.py
+
+# Migrate specific tutorials
+python3 migrate_specific_tutorials.py
+
+# Test local storage health
+python3 test_local_storage.py
+```
+
+### Local Storage Structure
+```
+storage/
+├── recordings/                    # Tutorial recordings and files
+│   └── [tutorial-section-uuid]/
+│       ├── recording.wav          # Audio recording
+│       ├── description.md         # Section description  
+│       ├── keystroke.json         # Keystroke data
+│       ├── consoleAction.json     # Console interactions
+│       ├── layoutAction.json      # Layout changes
+│       └── transcript.json        # Audio transcript
+└── layouts/                       # User layout preferences
+    └── [user-id]/
+        └── [tutorial-id]/
+            ├── author/
+            └── learner/
+```
 
 ## AWS S3 Configuration
 
@@ -458,11 +543,19 @@ mysql -u itss_user -p -h localhost interactive_tutorial_system
 
 #### Import Errors
 ```bash
+# Ensure you're running from server root directory
+cd /path/to/server
+
+# Check current directory structure
+ls -la
+
 # Reinstall dependencies
 pip install --upgrade -r requirements.txt
+pip install --upgrade -r auth/requirements.txt
+pip install --upgrade -r tutorial/requirements.txt
 
-# Check Python path
-python -c "import sys; print(sys.path)"
+# Run with explicit PYTHONPATH
+PYTHONPATH=. python3 auth/application.py
 ```
 
 #### Port Conflicts

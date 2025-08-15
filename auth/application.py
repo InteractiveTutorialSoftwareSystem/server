@@ -13,7 +13,7 @@ from decouple import config
 from google.oauth2 import id_token
 from google.auth.transport import requests as googleRequests
 from logging.handlers import RotatingFileHandler
-from schema import User, UserAuth, UserOauth, db
+from auth.schema import User, UserAuth, UserOauth, db
 
 # db = flask_sqlalchemy.SQLAlchemy()
 guard = flask_praetorian.Praetorian()
