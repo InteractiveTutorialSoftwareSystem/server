@@ -478,7 +478,8 @@ def getTutorialPageDetails(TutorialId, PageId, UserId):
     try:
       transcript_content = storage.get_recording_file(tutorial_page_details.id, 'transcript.json')
       transcript = transcript_content.decode('utf-8') if transcript_content else None
-    except:
+    except Exception as e:
+      app.logger.error(f"Transcript retrieval error for {tutorial_page_details.id}: {str(e)}")
       transcript = None
 
     try:
