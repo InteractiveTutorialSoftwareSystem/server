@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify, g, Response, redirect
 import flask_sqlalchemy
 import flask_cors
+from werkzeug.serving import WSGIRequestHandler
 import base64
 import os
 import time
@@ -91,6 +92,14 @@ def validate_uuid_input(value):
 # Initialize flask app
 application = app = Flask(__name__)
 app.debug = config("DEBUG", default=False, cast=bool)
+# Set very large MAX_CONTENT_LENGTH to override Werkzeug's default limit
+app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024  # 1GB - effectively unlimited
+# Configure Werkzeug Request limits for large form uploads
+from werkzeug.wrappers import Request
+Request.max_form_parts = 10000  # Increase form parts limit
+Request.max_form_memory_size = 1024 * 1024 * 1024  # 1GB form memory
+# Additional upload configurations
+app.config['UPLOAD_FOLDER'] = '/tmp'
 # Initializes CORS with specific origins
 cors = flask_cors.CORS()
 allowed_origins = config("ALLOWED_ORIGINS", default="http://localhost:3000").split(",")
@@ -998,6 +1007,105 @@ def run_script(language):
   filename_display = script.get('filename', 'script')
   error_output = errors.decode().replace(id, filename_display)
   return {"output": error_output}, 200
+
+
+@app.route("/compile_script/<string:language>", methods=["POST"])
+def compile_script(language):
+  """
+    Compiles provided script code. 
+    Currently supports java and similar compiled languages.
+    Returns compilation results/errors.
+  """
+  data = request.get_data()
+  script = json.loads(data)
+
+  # Validate language
+  allowed_languages = ["java", "javascript", "python"]
+  if language not in allowed_languages:
+    return {"output": "Unsupported language"}, 400
+
+  # Validate script content
+  if not sanitize_script_content(script['data'], language):
+    return {"output": "Script content not allowed for security reasons"}, 400
+
+  # Validate filename if provided
+  if 'filename' in script and not validate_filename(script['filename']):
+    return {"output": "Invalid filename"}, 400
+
+  id = uuid.uuid4().hex
+
+  # For languages that don't need compilation, return success
+  if language == "python":
+    return {"output": "Python is an interpreted language - no compilation needed", "success": True}, 200
+  elif language == "javascript":
+    return {"output": "JavaScript is an interpreted language - no compilation needed", "success": True}, 200
+  elif language == "java":
+    pathName = "./script/" + id + ".java"
+    
+    # Ensure script directory exists and is secure
+    script_dir = "./script/"
+    if not os.path.exists(script_dir):
+      os.makedirs(script_dir, mode=0o755)
+
+    # Write file securely
+    try:
+      with open(pathName, 'wb') as f:
+        f.write(script['data'].encode())
+      # Set restrictive permissions
+      os.chmod(pathName, 0o644)
+    except (OSError, IOError) as e:
+      app.logger.error(f"File write error: {str(e)}, uuid: {g.uuid}")
+      return {"output": "Failed to create script file"}, 500
+
+    # Compile Java code
+    cmd = "javac " + id + ".java"
+    
+    if (platform.system() == "Windows"):
+      p1 = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True, cwd="script", creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
+    else:
+      p1 = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True, cwd="script", preexec_fn=os.setsid)
+    
+    try:
+      timeStarted = time.time()
+      output, errors = p1.communicate(timeout=10)
+      timeDelta = time.time() - timeStarted
+      p1.wait()
+    except subprocess.TimeoutExpired as e:
+      if (platform.system() == "Windows"):
+        p1.send_signal(signal.CTRL_BREAK_EVENT)
+      else:
+        os.killpg(p1.pid, signal.SIGTERM)
+      # Clean up files securely
+      try:
+        os.remove(pathName)
+        class_file = "./script/" + id + ".class"
+        if os.path.exists(class_file):
+          os.remove(class_file)
+      except OSError:
+        pass
+      return {"output": "Compilation timeout after 10 seconds"}, 200
+
+    # Clean up source file securely
+    try:
+      os.remove(pathName)
+    except OSError:
+      pass
+
+    if p1.returncode == 0:
+      # Clean up compiled class file
+      try:
+        class_file = "./script/" + id + ".class"
+        if os.path.exists(class_file):
+          os.remove(class_file)
+      except OSError:
+        pass
+      return {"output": "Compilation successful", "success": True, "time": timeDelta}, 200
+    else:
+      filename_display = script.get('filename', 'script')
+      error_output = errors.decode().replace(id, filename_display)
+      return {"output": error_output, "success": False}, 200
+
+  return {"output": "Language not supported for compilation"}, 400
 
 
 @app.route("/tutorial_section/get/<string:TutorialSectionId>")

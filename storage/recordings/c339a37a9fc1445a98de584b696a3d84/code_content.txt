@@ -1,0 +1,3 @@
+language1 = input()
+language2 = input()
+print("I am learning to code in " + language1 + " and " + language2)

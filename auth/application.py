@@ -25,6 +25,8 @@ app.debug = config("DEBUG", default=False, cast=bool)
 app.config['SECRET_KEY'] = config("APP_SECRET_KEY")
 app.config['JWT_ACCESS_LIFESPAN'] = {'hours': 24}
 app.config['JWT_REFRESH_LIFESPAN'] = {'days': 30}
+# Set very large MAX_CONTENT_LENGTH to override Werkzeug's default limit  
+app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024  # 1GB - effectively unlimited
 
 # Initialize a local database
 app.config['SQLALCHEMY_DATABASE_URI'] = config("SQLALCHEMY_DATABASE_URI")
@@ -388,12 +390,16 @@ def refresh():
         return {'message':'Token Expired'}, 400
   
   
-@app.route('/auth/protected')
+@app.route('/auth/protected', methods=['GET', 'OPTIONS'])
 def protected():
     """
     A protected endpoint. The auth_required decorator will require a header
     containing a valid JWT
     """
+    if request.method == 'OPTIONS':
+        # Handle preflight request
+        return '', 200
+        
     try:
         bearer, _, token = request.headers.get('Authorization').partition(' ')
         if bearer != 'Bearer':
